@@ -9,7 +9,7 @@ import torch
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
-DATA_DIR = os.path.expanduser("~/Downloads/audio")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "audio")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed")
 
 SAMPLE_RATE = 44100
