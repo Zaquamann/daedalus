@@ -15,9 +15,9 @@ DATA_PATH = os.path.join(SCRIPT_DIR, "processed", "dataset.pt")
 MODEL_PATH = os.path.join(SCRIPT_DIR, "processed", "model.pt")
 
 BATCH_SIZE = 32
-NUM_EPOCHS = 100
+NUM_EPOCHS = 200
 LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 1e-2
 TEST_SIZE = 0.33
 PATIENCE = 15
 RANDOM_SEED = 42
@@ -62,39 +62,51 @@ class WordDataset(Dataset):
 
 
 # ── Model ───────────────────────────────────────────────────────────────────
-class WordCNN(nn.Module):
-    def __init__(self, num_classes, input_shape=(1, 80, 99)):
-        super().__init__()
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-        )
-        # Compute flat_size dynamically
-        with torch.no_grad():
-            dummy = torch.zeros(1, *input_shape)
-            dummy = self.conv2(self.conv1(dummy))
-            flat_size = dummy.numel()
 
-        self.fc = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(flat_size, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, num_classes),
-        )
+
+class ResBlock(nn.Module):
+    """Residual block: Conv-BN-ReLU-Conv-BN + skip, optional stride-2 downsample."""
+
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
+
+        if stride != 1 or in_ch != out_ch:
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
+        else:
+            self.skip = nn.Identity()
 
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = x.flatten(1)
+        identity = self.skip(x)
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.relu(out + identity)
+        return out
+
+
+class WordResNet(nn.Module):
+    """Lean 2-block ResNet for spoken word classification on mel spectrograms."""
+
+    def __init__(self, num_classes):
+        super().__init__()
+        self.block1 = ResBlock(1, 64, stride=2)
+        self.block2 = ResBlock(64, 128, stride=2)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.3)
+        self.fc = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.gap(x).flatten(1)
+        x = self.dropout(x)
         x = self.fc(x)
         return x
 
@@ -144,8 +156,14 @@ def main():
     train_dataset = WordDataset(spectrograms[train_idx], labels[train_idx], augment=True)
     val_dataset = WordDataset(spectrograms[val_idx], labels[val_idx], augment=False)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+        num_workers=4, pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False,
+        num_workers=4, pin_memory=True,
+    )
 
     print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
@@ -154,14 +172,17 @@ def main():
     print(f"Device: {device}")
 
     # Model
-    input_shape = (1, spectrograms.shape[1], spectrograms.shape[2])
-    model = WordCNN(num_classes, input_shape).to(device)
+    model = WordResNet(num_classes).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
 
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # Homeostatic synaptic scaling (Tononi & Cirelli): gradually reduce LR
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=NUM_EPOCHS, eta_min=1e-6,
+    )
 
     # Training loop with early stopping
     best_val_loss = float("inf")
@@ -232,6 +253,8 @@ def main():
             if patience_counter >= PATIENCE:
                 print(f"\nEarly stopping at epoch {epoch} (no val loss improvement for {PATIENCE} epochs)")
                 break
+
+        scheduler.step()
 
     print(f"\nTraining complete.")
     print(f"Best val loss: {best_val_loss:.4f}")

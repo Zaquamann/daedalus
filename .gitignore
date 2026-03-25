@@ -5,6 +5,9 @@ models/
 # IDE
 .idea/
 
+# Backups
+*.bak
+
 # Python
 __pycache__/
 *.pyc

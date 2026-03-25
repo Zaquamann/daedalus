@@ -9,7 +9,7 @@ import torch
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+DATA_DIR = os.path.expanduser("~/Downloads/audio")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed")
 
 SAMPLE_RATE = 44100
@@ -73,12 +73,12 @@ def wav_to_log_mel_spectrogram(audio, sr, mel_fb):
 
 # ── Label extraction ────────────────────────────────────────────────────────
 def extract_label(filename):
-    """Extract the word label from filename like '01-001_PAUSE-C.wav'."""
-    # Split on first underscore, then strip the trailing '-C.wav'
-    name_no_ext = filename.rsplit(".wav", 1)[0]  # '01-001_PAUSE-C'
-    label_part = name_no_ext.split("_", 1)[1]     # 'PAUSE-C'
-    label = label_part.rsplit("-C", 1)[0]          # 'PAUSE'
-    return label
+    """Extract the word label from filename like '01_01-002_REPLY-C.wav'."""
+    name_no_ext = filename.rsplit(".wav", 1)[0]   # '01_01-002_REPLY-C'
+    parts = name_no_ext.split("_", 2)             # ['01', '01-002', 'REPLY-C']
+    label_part = parts[2]                          # 'REPLY-C'
+    label = label_part.rsplit("-C", 1)[0]          # 'REPLY'
+    return label.strip()
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -90,46 +90,42 @@ def main():
     labels = []
     file_paths = []
 
-    # Walk all numbered speaker folders
+    # Walk all speaker-* folders (flat structure: speaker-NN/*.wav)
     speaker_dirs = sorted(
         d for d in os.listdir(DATA_DIR)
-        if os.path.isdir(os.path.join(DATA_DIR, d))
+        if d.startswith("speaker-") and os.path.isdir(os.path.join(DATA_DIR, d))
     )
 
     for speaker_id in speaker_dirs:
         speaker_path = os.path.join(DATA_DIR, speaker_id)
-        # Handle nested structure: data/27/27/*.wav
-        sub_dirs = sorted(
-            d for d in os.listdir(speaker_path)
-            if os.path.isdir(os.path.join(speaker_path, d))
+        wav_files = sorted(
+            f for f in os.listdir(speaker_path)
+            if f.endswith("-C.wav")
+            and not f.startswith("._")
+            and "_SENT-END-" not in f
         )
-        if sub_dirs:
-            wav_dirs = [os.path.join(speaker_path, sd) for sd in sub_dirs]
-        else:
-            wav_dirs = [speaker_path]
+        print(f"  {speaker_id}: {len(wav_files)} files")
 
-        for wav_dir in wav_dirs:
-            wav_files = sorted(f for f in os.listdir(wav_dir) if f.endswith(".wav"))
-            for fname in wav_files:
-                fpath = os.path.join(wav_dir, fname)
-                sr, audio = wavfile.read(fpath)
+        for fname in wav_files:
+            fpath = os.path.join(speaker_path, fname)
+            sr, audio = wavfile.read(fpath)
 
-                # Convert to float32 normalized to [-1, 1]
-                audio = audio.astype(np.float32) / 32768.0
+            # Convert to float32 normalized to [-1, 1]
+            audio = audio.astype(np.float32) / 32768.0
 
-                # Pad (random position) or truncate to MAX_SAMPLES
-                if len(audio) < MAX_SAMPLES:
-                    pad_total = MAX_SAMPLES - len(audio)
-                    pad_left = np.random.randint(0, pad_total + 1)
-                    pad_right = pad_total - pad_left
-                    audio = np.pad(audio, (pad_left, pad_right))
-                else:
-                    audio = audio[:MAX_SAMPLES]
+            # Pad (random position) or truncate to MAX_SAMPLES
+            if len(audio) < MAX_SAMPLES:
+                pad_total = MAX_SAMPLES - len(audio)
+                pad_left = np.random.randint(0, pad_total + 1)
+                pad_right = pad_total - pad_left
+                audio = np.pad(audio, (pad_left, pad_right))
+            else:
+                audio = audio[:MAX_SAMPLES]
 
-                log_mel = wav_to_log_mel_spectrogram(audio, sr, mel_fb)
-                spectrograms.append(log_mel)
-                labels.append(extract_label(fname))
-                file_paths.append(fpath)
+            log_mel = wav_to_log_mel_spectrogram(audio, sr, mel_fb)
+            spectrograms.append(log_mel)
+            labels.append(extract_label(fname))
+            file_paths.append(fpath)
 
     # Build label-to-index mapping (sorted for determinism)
     unique_labels = sorted(set(labels))
