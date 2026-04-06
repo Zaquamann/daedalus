@@ -179,7 +179,6 @@ def main():
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    # Homeostatic synaptic scaling (Tononi & Cirelli): gradually reduce LR
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=NUM_EPOCHS, eta_min=1e-6,
     )
